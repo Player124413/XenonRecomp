@@ -40,6 +40,12 @@ size_t Function::SearchBlock(size_t address) const
 
 Function Function::Analyze(const void* code, size_t size, size_t base)
 {
+    // Safety net for pathological regions (data mistaken for code): real
+    // functions never come close to this many basic blocks, but analyzing
+    // garbage without a limit used to grow the block vector until the process
+    // ran out of memory (std::bad_alloc).
+    constexpr size_t c_maxBlockCount = 1ull << 20;
+
     Function fn{ base, 0 };
 
     if (*((uint32_t*)code + 1) == 0x04000048) // shifted ptr tail call
@@ -68,6 +74,12 @@ Function Function::Analyze(const void* code, size_t size, size_t base)
         if (blockStack.empty())
         {
             break; // it's hideover
+        }
+
+        if (blocks.size() > c_maxBlockCount)
+        {
+            fprintf(stderr, "WARNING: Function at 0x%zX exceeded the block limit during analysis, it is likely data and not code.\n", base);
+            break;
         }
 
         auto& curBlock = blocks[blockStack.back()];
@@ -106,18 +118,23 @@ Function Function::Analyze(const void* code, size_t size, size_t base)
             assert(!PPC_BA(instruction));
             const size_t branchDest = addr + PPC_BD(instruction);
 
+            // Branches out of the analyzed region are tail calls to other
+            // functions. Following them used to create blocks with underflowed
+            // bases that corrupted the block list.
+            const bool destInBounds = branchDest >= base && branchDest < base + size;
+
             // true/false paths
             // left block: false case
             // right block: true case
             const size_t lBase = (addr - base) + 4;
-            const size_t rBase = (addr + PPC_BD(instruction)) - base;
+            const size_t rBase = branchDest - base;
 
             // these will be -1 if it's our first time seeing these blocks
             auto lBlock = fn.SearchBlock(base + lBase);
 
             if (lBlock == -1)
             {
-                blocks.emplace_back(lBase, 0).projectedSize = rBase - lBase;
+                blocks.emplace_back(lBase, 0).projectedSize = destInBounds ? rBase - lBase : static_cast<size_t>(-1);
                 lBlock = blocks.size() - 1;
 
                 // push this first, this gets overriden by the true case as it'd be further away
@@ -125,14 +142,17 @@ Function Function::Analyze(const void* code, size_t size, size_t base)
                 blockStack.emplace_back(lBlock);
             }
 
-            size_t rBlock = fn.SearchBlock(base + rBase);
-            if (rBlock == -1)
+            if (destInBounds)
             {
-                blocks.emplace_back(branchDest - base, 0);
-                rBlock = blocks.size() - 1;
+                size_t rBlock = fn.SearchBlock(base + rBase);
+                if (rBlock == -1)
+                {
+                    blocks.emplace_back(rBase, 0);
+                    rBlock = blocks.size() - 1;
 
-                DEBUG(blocks[rBlock].parent = blockBase);
-                blockStack.emplace_back(rBlock);
+                    DEBUG(blocks[rBlock].parent = blockBase);
+                    blockStack.emplace_back(rBlock);
+                }
             }
 
             RESTORE_DATA();
@@ -186,7 +206,7 @@ Function Function::Analyze(const void* code, size_t size, size_t base)
                     {
                         // right block's just going to return
                         const size_t lBase = (addr - base) + 4;
-                        size_t lBlock = fn.SearchBlock(lBase);
+                        size_t lBlock = fn.SearchBlock(base + lBase);
                         if (lBlock == -1)
                         {
                             blocks.emplace_back(lBase, 0);
@@ -242,5 +262,13 @@ Function Function::Analyze(const void* code, size_t size, size_t base)
         // pick the block furthest away
         fn.size = std::max(fn.size, block.base + block.size);
     }
+
+    // Never report a function larger than the region that was analyzed. Stray
+    // blocks past the end come from bogus branch targets inside data and used
+    // to make the recompiler read (and buffer) memory out of bounds.
+    const size_t maxSize = (size + 3) & ~size_t(3);
+    if (fn.size > maxSize)
+        fn.size = maxSize;
+
     return fn;
 }

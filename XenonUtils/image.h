@@ -27,9 +27,15 @@ struct Image
 
     /**
      * \param address Virtual Address
-     * \return Pointer to image owned data
+     * \return Pointer to image owned data, or nullptr if the address is not mapped
      */
     const void* Find(size_t address) const;
+
+    /**
+     * \param address Virtual Address
+     * \return Section that contains the address, or nullptr if the address is not mapped
+     */
+    const Section* FindSection(size_t address) const;
 
     /**
      * \param name Name of section

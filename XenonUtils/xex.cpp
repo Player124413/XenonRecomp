@@ -2,9 +2,11 @@
 #include "image.h"
 #include <cassert>
 #include <cstring>
+#include <new>
 #include <vector>
 #include <unordered_map>
 #include <aes.hpp>
+#include <fmt/core.h>
 #include <TinySHA1.hpp>
 #include <xex_patcher.h>
 
@@ -114,6 +116,14 @@ typedef struct _IMAGE_SECTION_HEADER {
 
 #endif
 
+#ifndef IMAGE_DOS_SIGNATURE
+#define IMAGE_DOS_SIGNATURE    0x5A4D      // MZ
+#endif
+
+#ifndef IMAGE_NT_SIGNATURE
+#define IMAGE_NT_SIGNATURE     0x00004550  // PE00
+#endif
+
 std::unordered_map<size_t, const char*> XamExports = 
 {
     #include "xbox/xam_table.inc"
@@ -126,21 +136,80 @@ std::unordered_map<size_t, const char*> XboxKernelExports =
 
 Image Xex2LoadImage(const uint8_t* data, size_t dataSize)
 {
+    // The Xbox 360 has 512 MB of RAM, an image larger than this is guaranteed
+    // to be the result of a corrupt header (or an unsupported file) and would
+    // previously blow up with std::bad_alloc.
+    constexpr size_t MaxImageSize = 1ull * 1024 * 1024 * 1024;
+
+    if (data == nullptr || dataSize < sizeof(Xex2Header))
+    {
+        fmt::println("ERROR: File is too small to be a valid XEX2 executable.");
+        return {};
+    }
+
     auto* header = reinterpret_cast<const Xex2Header*>(data);
-    auto* security = reinterpret_cast<const Xex2SecurityInfo*>(data + header->securityOffset);
+
+    const uint32_t headerSize = header->headerSize;
+    const uint32_t securityOffset = header->securityOffset;
+
+    if (headerSize > dataSize || headerSize < sizeof(Xex2Header))
+    {
+        fmt::println("ERROR: XEX2 header size (0x{:X}) is out of bounds for a file of size 0x{:X}. The file may be truncated or corrupt.", headerSize, dataSize);
+        return {};
+    }
+
+    if (securityOffset > dataSize || dataSize - securityOffset < sizeof(Xex2SecurityInfo))
+    {
+        fmt::println("ERROR: XEX2 security info offset (0x{:X}) is out of bounds. The file may be truncated or corrupt.", securityOffset);
+        return {};
+    }
+
+    if (24 + size_t(header->headerCount.get()) * sizeof(Xex2OptHeader) > headerSize)
+    {
+        fmt::println("ERROR: XEX2 optional header count ({}) is out of bounds. The file may be corrupt.", header->headerCount.get());
+        return {};
+    }
+
+    auto* security = reinterpret_cast<const Xex2SecurityInfo*>(data + securityOffset);
     const auto* fileFormatInfo = reinterpret_cast<const Xex2OptFileFormatInfo*>(getOptHeaderPtr(data, XEX_HEADER_FILE_FORMAT_INFO));
 
     Image image{};
     std::unique_ptr<uint8_t[]> result{};
     size_t imageSize = security->imageSize;
 
+    if (imageSize == 0 || imageSize > MaxImageSize)
+    {
+        fmt::println("ERROR: XEX2 image size (0x{:X}) reported by the security info is invalid. The file may be corrupt or unsupported.", imageSize);
+        return {};
+    }
+
+    // Helper that reports allocation failures instead of terminating with std::bad_alloc.
+    auto allocImageBuffer = [](size_t size) -> std::unique_ptr<uint8_t[]>
+    {
+        try
+        {
+            return std::make_unique<uint8_t[]>(size);
+        }
+        catch (const std::bad_alloc&)
+        {
+            fmt::println("ERROR: Failed to allocate {} bytes of memory. Not enough memory available to process this XEX file.", size);
+            return {};
+        }
+    };
+
     // Decompress image
     if (fileFormatInfo != nullptr)
     {
-        assert(fileFormatInfo->compressionType <= XEX_COMPRESSION_NORMAL);
+        const uint16_t compressionType = fileFormatInfo->compressionType;
+        if (compressionType > XEX_COMPRESSION_NORMAL)
+        {
+            fmt::println("ERROR: Delta-compressed XEX files (title update patches) cannot be recompiled directly. Pass the base XEX together with the patch through the config file instead.");
+            return {};
+        }
 
         std::unique_ptr<uint8_t[]> decryptedData;
         const uint8_t* srcData = nullptr;
+        const size_t exeFileSize = dataSize - headerSize;
 
         if (fileFormatInfo->encryptionType == XEX_ENCRYPTION_NORMAL)
         {
@@ -152,35 +221,81 @@ Image Xex2LoadImage(const uint8_t* data, size_t dataSize)
             AES_init_ctx_iv(&aesContext, Xex2RetailKey, AESBlankIV);
             AES_CBC_decrypt_buffer(&aesContext, decryptedKey, KeySize);
 
-            decryptedData = std::make_unique<uint8_t[]>(dataSize - header->headerSize);
-            memcpy(decryptedData.get(), data + header->headerSize, dataSize - header->headerSize);
+            decryptedData = allocImageBuffer(exeFileSize);
+            if (decryptedData == nullptr)
+                return {};
+
+            memcpy(decryptedData.get(), data + headerSize, exeFileSize);
             AES_init_ctx_iv(&aesContext, decryptedKey, AESBlankIV);
-            AES_CBC_decrypt_buffer(&aesContext, decryptedData.get(), dataSize - header->headerSize);
+            AES_CBC_decrypt_buffer(&aesContext, decryptedData.get(), exeFileSize);
 
             srcData = decryptedData.get();
         }
+        else if (fileFormatInfo->encryptionType == XEX_ENCRYPTION_NONE)
+        {
+            srcData = data + headerSize;
+        }
         else
         {
-            srcData = data + header->headerSize;
+            fmt::println("ERROR: Unknown XEX2 encryption type ({}).", static_cast<uint16_t>(fileFormatInfo->encryptionType));
+            return {};
         }
 
-        if (fileFormatInfo->compressionType == XEX_COMPRESSION_NONE)
+        if (compressionType == XEX_COMPRESSION_NONE)
         {
-            result = std::make_unique<uint8_t[]>(imageSize);
+            if (imageSize > exeFileSize)
+            {
+                fmt::println("ERROR: XEX2 image size (0x{:X}) is larger than the data available in the file (0x{:X}). The file may be truncated or corrupt.", imageSize, exeFileSize);
+                return {};
+            }
+
+            result = allocImageBuffer(imageSize);
+            if (result == nullptr)
+                return {};
+
             memcpy(result.get(), srcData, imageSize);
         }
-        else if (fileFormatInfo->compressionType == XEX_COMPRESSION_BASIC)
+        else if (compressionType == XEX_COMPRESSION_BASIC)
         {
+            if (fileFormatInfo->infoSize < sizeof(Xex2FileBasicCompressionInfo) * 2)
+            {
+                fmt::println("ERROR: XEX2 basic compression info size (0x{:X}) is invalid.", static_cast<uint32_t>(fileFormatInfo->infoSize));
+                return {};
+            }
+
             auto* blocks = reinterpret_cast<const Xex2FileBasicCompressionBlock*>(fileFormatInfo + 1);
             const size_t numBlocks = (fileFormatInfo->infoSize / sizeof(Xex2FileBasicCompressionInfo)) - 1;
 
+            if (reinterpret_cast<const uint8_t*>(blocks) + numBlocks * sizeof(Xex2FileBasicCompressionBlock) > data + dataSize)
+            {
+                fmt::println("ERROR: XEX2 basic compression blocks are out of bounds. The file may be corrupt.");
+                return {};
+            }
+
             imageSize = 0;
+            size_t compressedSize = 0;
             for (size_t i = 0; i < numBlocks; i++)
             {
                 imageSize += blocks[i].dataSize + blocks[i].zeroSize;
+                compressedSize += blocks[i].dataSize;
             }
 
-            result = std::make_unique<uint8_t[]>(imageSize);
+            if (imageSize == 0 || imageSize > MaxImageSize)
+            {
+                fmt::println("ERROR: XEX2 basic compression blocks describe an invalid image size (0x{:X}).", imageSize);
+                return {};
+            }
+
+            if (compressedSize > exeFileSize)
+            {
+                fmt::println("ERROR: XEX2 basic compression blocks require 0x{:X} bytes of data, but the file only contains 0x{:X}. The file may be truncated or corrupt.", compressedSize, exeFileSize);
+                return {};
+            }
+
+            result = allocImageBuffer(imageSize);
+            if (result == nullptr)
+                return {};
+
             auto* destData = result.get();
 
             for (size_t i = 0; i < numBlocks; i++)
@@ -194,18 +309,30 @@ Image Xex2LoadImage(const uint8_t* data, size_t dataSize)
                 destData += blocks[i].zeroSize;
             }
         }
-        else if (fileFormatInfo->compressionType == XEX_COMPRESSION_NORMAL)
+        else if (compressionType == XEX_COMPRESSION_NORMAL)
         {
-            result = std::make_unique<uint8_t[]>(imageSize);
+            result = allocImageBuffer(imageSize);
+            if (result == nullptr)
+                return {};
+
             auto* destData = result.get();
 
-            const Xex2CompressedBlockInfo* blocks = &((const Xex2FileNormalCompressionInfo*)(fileFormatInfo + 1))->firstBlock;
-            const uint32_t headerSize = header->headerSize.get();
+            const Xex2FileNormalCompressionInfo* normalInfo = (const Xex2FileNormalCompressionInfo*)(fileFormatInfo + 1);
+            if (reinterpret_cast<const uint8_t*>(normalInfo) + sizeof(Xex2FileNormalCompressionInfo) > data + dataSize)
+            {
+                fmt::println("ERROR: XEX2 LZX compression info is out of bounds. The file may be corrupt.");
+                return {};
+            }
 
-            const uint32_t exeLength = dataSize - headerSize;
+            const Xex2CompressedBlockInfo* blocks = &normalInfo->firstBlock;
+
+            const uint32_t exeLength = static_cast<uint32_t>(exeFileSize);
             const uint8_t* exeBuffer = srcData;
 
-            auto compressBuffer = std::make_unique<uint8_t[]>(exeLength);
+            auto compressBuffer = allocImageBuffer(exeLength);
+            if (compressBuffer == nullptr)
+                return {};
+
             const uint8_t* p = NULL;
             uint8_t* d = NULL;
             sha1::SHA1 s;
@@ -214,8 +341,15 @@ Image Xex2LoadImage(const uint8_t* data, size_t dataSize)
             d = compressBuffer.get();
 
             uint8_t blockCalcedDigest[0x14];
+            const uint8_t* exeEnd = srcData + exeLength;
             while (blocks->blockSize) 
             {
+                if (blocks->blockSize.get() < sizeof(Xex2CompressedBlockInfo) || p < srcData || p + blocks->blockSize.get() > exeEnd)
+                {
+                    fmt::println("ERROR: XEX2 compressed block at offset 0x{:X} is out of bounds. The file may be truncated or corrupt.", static_cast<size_t>(p - srcData));
+                    return {};
+                }
+
                 const uint8_t* pNext = p + blocks->blockSize;
                 const auto* nextBlock = (const Xex2CompressedBlockInfo*)p;
 
@@ -224,7 +358,10 @@ Image Xex2LoadImage(const uint8_t* data, size_t dataSize)
                 s.finalize(blockCalcedDigest);
 
                 if (memcmp(blockCalcedDigest, blocks->blockHash, 0x14) != 0)
+                {
+                    fmt::println("ERROR: XEX2 block hash mismatch, the file may be corrupt.");
                     return {};
+                }
 
                 p += 4;
                 p += 20;
@@ -253,8 +390,17 @@ Image Xex2LoadImage(const uint8_t* data, size_t dataSize)
             resultCode = lzxDecompress(compressBuffer.get(), d - compressBuffer.get(), buffer, uncompressedSize, ((const Xex2FileNormalCompressionInfo*)(fileFormatInfo + 1))->windowSize, nullptr, 0);
 
             if (resultCode)
+            {
+                fmt::println("ERROR: LZX decompression of the XEX2 file failed (code {}). The file may be corrupt.", resultCode);
                 return {};
+            }
         }
+    }
+
+    if (result == nullptr)
+    {
+        fmt::println("ERROR: XEX2 file does not contain a supported file format info header.");
+        return {};
     }
 
     image.data = std::move(result);
@@ -262,7 +408,24 @@ Image Xex2LoadImage(const uint8_t* data, size_t dataSize)
 
     // Map image
     const auto* dosHeader = reinterpret_cast<IMAGE_DOS_HEADER*>(image.data.get());
+    if (image.size < sizeof(IMAGE_DOS_HEADER) + sizeof(IMAGE_NT_HEADERS32) || dosHeader->e_magic != IMAGE_DOS_SIGNATURE)
+    {
+        fmt::println("ERROR: XEX2 image does not contain a valid executable header. The file may be corrupt or use an unsupported encryption scheme.");
+        return {};
+    }
+
+    if (dosHeader->e_lfanew >= image.size - sizeof(IMAGE_NT_HEADERS32))
+    {
+        fmt::println("ERROR: XEX2 image PE header offset (0x{:X}) is out of bounds.", dosHeader->e_lfanew);
+        return {};
+    }
+
     const auto* ntHeaders = reinterpret_cast<IMAGE_NT_HEADERS32*>(image.data.get() + dosHeader->e_lfanew);
+    if (ntHeaders->Signature != IMAGE_NT_SIGNATURE)
+    {
+        fmt::println("ERROR: XEX2 image does not contain a valid PE signature. The file may be corrupt.");
+        return {};
+    }
 
     image.base = security->loadAddress;
     const void* xex2BaseAddressPtr = getOptHeaderPtr(data, XEX_HEADER_IMAGE_BASE_ADDRESS);
@@ -277,7 +440,19 @@ Image Xex2LoadImage(const uint8_t* data, size_t dataSize)
     }
 
     const auto numSections = ntHeaders->FileHeader.NumberOfSections;
+    if (numSections == 0 || numSections > 96)
+    {
+        fmt::println("ERROR: XEX2 image reports an invalid section count ({}). The file may be corrupt.", numSections);
+        return {};
+    }
+
     const auto* sections = reinterpret_cast<const IMAGE_SECTION_HEADER*>(ntHeaders + 1);
+    const size_t sectionsEnd = dosHeader->e_lfanew + sizeof(IMAGE_NT_HEADERS32) + size_t(numSections) * sizeof(IMAGE_SECTION_HEADER);
+    if (sectionsEnd > image.size)
+    {
+        fmt::println("ERROR: XEX2 image section headers are out of bounds. The file may be corrupt.");
+        return {};
+    }
 
     for (size_t i = 0; i < numSections; i++)
     {
@@ -287,6 +462,12 @@ Image Xex2LoadImage(const uint8_t* data, size_t dataSize)
         if (section.Characteristics & IMAGE_SCN_CNT_CODE)
         {
             flags |= SectionFlags_Code;
+        }
+
+        if (section.VirtualAddress >= image.size || section.Misc.VirtualSize > image.size - section.VirtualAddress)
+        {
+            fmt::println("ERROR: XEX2 image section {} is out of bounds. The file may be corrupt.", reinterpret_cast<const char*>(section.Name));
+            return {};
         }
 
         image.Map(reinterpret_cast<const char*>(section.Name), section.VirtualAddress, 
@@ -327,6 +508,12 @@ Image Xex2LoadImage(const uint8_t* data, size_t dataSize)
             for (size_t im = 0; im < library->numberOfImports; im++)
             {
                 auto originalThunk = (Xex2ThunkData*)image.Find(descriptors[im].firstThunk);
+                if (originalThunk == nullptr)
+                {
+                    fmt::println("WARNING: Import thunk at 0x{:X} is not mapped in the image, skipping.", static_cast<uint32_t>(descriptors[im].firstThunk));
+                    continue;
+                }
+
                 auto originalData = originalThunk;
                 originalData->data = ByteSwap(originalData->data);
 

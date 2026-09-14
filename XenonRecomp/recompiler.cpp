@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "recompiler.h"
+#include <crt_helpers.h>
 #include <xex_patcher.h>
 
 static uint64_t ComputeMask(uint32_t mstart, uint32_t mstop)
@@ -21,6 +22,12 @@ bool Recompiler::LoadConfig(const std::string_view& configFilePath)
     if (file.empty())
     {
         file = LoadFile((config.directoryPath + config.filePath).c_str());
+        if (file.empty())
+        {
+            fmt::println("ERROR: Unable to load the XEX file '{}{}'.", config.directoryPath, config.filePath);
+            fmt::println("       Make sure the file exists and that the file_path property in the TOML file points to it.");
+            return false;
+        }
 
         if (!config.patchFilePath.empty())
         {
@@ -90,6 +97,45 @@ bool Recompiler::LoadConfig(const std::string_view& configFilePath)
     }
 
     image = Image::ParseImage(file.data(), file.size());
+    if (image.data == nullptr || image.sections.empty())
+    {
+        fmt::println("ERROR: Unable to parse the executable, no image sections were loaded.");
+        fmt::println("       The file must be a decrypted XEX2 or ELF executable. See the messages above for details.");
+        return false;
+    }
+
+    // Auto-detect the CRT register save/restore helper functions that were not
+    // specified in the config file. Their instruction sequences are part of the
+    // standard Xbox 360 CRT and are effectively identical between games.
+    const CrtHelperAddresses helpers = DetectCrtHelpers(image);
+
+    auto detectHelper = [](uint32_t& configValue, uint32_t detectedValue, const std::string_view& name)
+    {
+        if (configValue == 0 && detectedValue != 0)
+        {
+            configValue = detectedValue;
+            fmt::println("Auto-detected {} at 0x{:X}", name, detectedValue);
+        }
+    };
+
+    detectHelper(config.restGpr14Address, helpers.restGpr14, "__restgprlr_14");
+    detectHelper(config.saveGpr14Address, helpers.saveGpr14, "__savegprlr_14");
+    detectHelper(config.restFpr14Address, helpers.restFpr14, "__restfpr_14");
+    detectHelper(config.saveFpr14Address, helpers.saveFpr14, "__savefpr_14");
+    detectHelper(config.restVmx14Address, helpers.restVmx14, "__restvmx_14");
+    detectHelper(config.saveVmx14Address, helpers.saveVmx14, "__savevmx_14");
+    detectHelper(config.restVmx64Address, helpers.restVmx64, "__restvmx_64");
+    detectHelper(config.saveVmx64Address, helpers.saveVmx64, "__savevmx_64");
+
+    if (config.restGpr14Address == 0) fmt::println("ERROR: __restgprlr_14 address is unspecified and could not be auto-detected");
+    if (config.saveGpr14Address == 0) fmt::println("ERROR: __savegprlr_14 address is unspecified and could not be auto-detected");
+    if (config.restFpr14Address == 0) fmt::println("ERROR: __restfpr_14 address is unspecified and could not be auto-detected");
+    if (config.saveFpr14Address == 0) fmt::println("ERROR: __savefpr_14 address is unspecified and could not be auto-detected");
+    if (config.restVmx14Address == 0) fmt::println("ERROR: __restvmx_14 address is unspecified and could not be auto-detected");
+    if (config.saveVmx14Address == 0) fmt::println("ERROR: __savevmx_14 address is unspecified and could not be auto-detected");
+    if (config.restVmx64Address == 0) fmt::println("ERROR: __restvmx_64 address is unspecified and could not be auto-detected");
+    if (config.saveVmx64Address == 0) fmt::println("ERROR: __savevmx_64 address is unspecified and could not be auto-detected");
+
     return true;
 }
 
@@ -170,27 +216,57 @@ void Recompiler::Analyse()
 
     for (auto& [address, size] : config.functions)
     {
+        const Section* section = image.FindSection(address);
+        if (size == 0 || section == nullptr)
+        {
+            fmt::println("WARNING: Explicitly defined function at 0x{:X} with size 0x{:X} is invalid or not mapped in the image, skipping.", address, size);
+            continue;
+        }
+
+        if (size > section->base + section->size - address)
+            size = static_cast<uint32_t>(section->base + section->size - address);
+
         functions.emplace_back(address, size);
         image.symbols.emplace(fmt::format("sub_{:X}", address), address, size, Symbol_Function);
     }
 
-    auto& pdata = *image.Find(".pdata");
-    size_t count = pdata.size / sizeof(IMAGE_CE_RUNTIME_FUNCTION);
-    auto* pf = (IMAGE_CE_RUNTIME_FUNCTION*)pdata.data;
-    for (size_t i = 0; i < count; i++)
+    auto* pdata = image.Find(".pdata");
+    if (pdata != nullptr && pdata->size >= sizeof(IMAGE_CE_RUNTIME_FUNCTION))
     {
-        auto fn = pf[i];
-        fn.BeginAddress = ByteSwap(fn.BeginAddress);
-        fn.Data = ByteSwap(fn.Data);
-
-        if (image.symbols.find(fn.BeginAddress) == image.symbols.end())
+        size_t count = pdata->size / sizeof(IMAGE_CE_RUNTIME_FUNCTION);
+        auto* pf = (IMAGE_CE_RUNTIME_FUNCTION*)pdata->data;
+        for (size_t i = 0; i < count; i++)
         {
-            auto& f = functions.emplace_back();
-            f.base = fn.BeginAddress;
-            f.size = fn.FunctionLength * 4;
+            auto fn = pf[i];
+            fn.BeginAddress = ByteSwap(fn.BeginAddress);
+            fn.Data = ByteSwap(fn.Data);
 
-            image.symbols.emplace(fmt::format("sub_{:X}", f.base), f.base, f.size, Symbol_Function);
+            // Skip over zero padding and other entries that do not describe a
+            // valid function. Zero-sized functions used to wedge the section
+            // scan below into an endless loop.
+            if (fn.BeginAddress == 0 || fn.FunctionLength == 0 || image.Find(fn.BeginAddress) == nullptr)
+                continue;
+
+            if (image.symbols.find(fn.BeginAddress) == image.symbols.end())
+            {
+                auto& f = functions.emplace_back();
+                f.base = fn.BeginAddress;
+                f.size = fn.FunctionLength * 4;
+
+                // Corrupt entries can describe functions that stretch far past
+                // the section they live in, which later makes the recompiler
+                // generate (and buffer) millions of bogus instructions.
+                const Section* fnSection = image.FindSection(f.base);
+                if (fnSection != nullptr && f.size > fnSection->base + fnSection->size - f.base)
+                    f.size = static_cast<size_t>(fnSection->base + fnSection->size - f.base);
+
+                image.symbols.emplace(fmt::format("sub_{:X}", f.base), f.base, f.size, Symbol_Function);
+            }
         }
+    }
+    else
+    {
+        fmt::println("WARNING: No .pdata section found, function boundaries will be detected through static analysis only.");
     }
 
     for (const auto& section : image.sections)
@@ -224,30 +300,42 @@ void Recompiler::Analyse()
 
         while (data < dataEnd)
         {
+            size_t advance = 0;
+
             auto invalidInstr = config.invalidInstructions.find(ByteSwap(*(uint32_t*)data));
             if (invalidInstr != config.invalidInstructions.end())
             {
-                base += invalidInstr->second;
-                data += invalidInstr->second;
-                continue;
-            }
-
-            auto fnSymbol = image.symbols.find(base);
-            if (fnSymbol != image.symbols.end() && fnSymbol->address == base && fnSymbol->type == Symbol_Function)
-            {
-                assert(fnSymbol->address == base);
-
-                base += fnSymbol->size;
-                data += fnSymbol->size;
+                advance = invalidInstr->second;
             }
             else
             {
-                auto& fn = functions.emplace_back(Function::Analyze(data, dataEnd - data, base));
-                image.symbols.emplace(fmt::format("sub_{:X}", fn.base), fn.base, fn.size, Symbol_Function);
+                auto fnSymbol = image.symbols.find(base);
+                if (fnSymbol != image.symbols.end() && fnSymbol->address == base && fnSymbol->type == Symbol_Function)
+                {
+                    assert(fnSymbol->address == base);
 
-                base += fn.size;
-                data += fn.size;
+                    advance = fnSymbol->size;
+                }
+                else
+                {
+                    auto& fn = functions.emplace_back(Function::Analyze(data, dataEnd - data, base));
+                    image.symbols.emplace(fmt::format("sub_{:X}", fn.base), fn.base, fn.size, Symbol_Function);
+
+                    advance = fn.size;
+                }
             }
+
+            // A zero-sized entry would spin here forever, endlessly appending
+            // functions until the process runs out of memory (std::bad_alloc).
+            // Force forward progress instead.
+            if (advance == 0)
+            {
+                fmt::println("WARNING: Skipping a zero-sized function entry at 0x{:X}", base);
+                advance = 4;
+            }
+
+            base += advance;
+            data += advance;
         }
     }
 
@@ -2288,6 +2376,23 @@ bool Recompiler::Recompile(const Function& fn)
     auto end = base + fn.size;
     auto* data = (uint32_t*)image.Find(base);
 
+    if (fn.size == 0 || data == nullptr)
+    {
+        if (fn.size != 0)
+            fmt::println("WARNING: Function at 0x{:X} is not mapped in the image, skipping.", fn.base);
+
+        return true;
+    }
+
+    // Final safety net against corrupt function sizes: never read or emit past
+    // the end of the section the function starts in.
+    const Section* fnSection = image.FindSection(base);
+    if (end > fnSection->base + fnSection->size)
+    {
+        fmt::println("WARNING: Function at 0x{:X} extends past the end of its section, truncating 0x{:X} to 0x{:X}.", fn.base, end, fnSection->base + fnSection->size);
+        end = fnSection->base + fnSection->size;
+    }
+
     static std::unordered_set<size_t> labels;
     labels.clear();
 
@@ -2548,6 +2653,12 @@ void Recompiler::Recompile(const std::filesystem::path& headerFilePath)
             }
         }
 
+        if (codeMin == ~size_t(0))
+        {
+            fmt::println("ERROR: The image does not contain any code sections, there is nothing to recompile.");
+            std::exit(EXIT_FAILURE);
+        }
+
         println("#define PPC_CODE_BASE 0x{:X}ull", codeMin);
         println("#define PPC_CODE_SIZE 0x{:X}ull", codeMax - codeMin);
 
@@ -2573,6 +2684,10 @@ void Recompiler::Recompile(const std::filesystem::path& headerFilePath)
             std::stringstream ss;
             ss << stream.rdbuf();
             out += ss.str();
+        }
+        else
+        {
+            fmt::println("WARNING: Unable to read the PPC context header '{}', the generated ppc_context.h will only include ppc_config.h.", headerFilePath.string());
         }
 
         SaveCurrentOutData("ppc_context.h");
@@ -2639,6 +2754,12 @@ void Recompiler::SaveCurrentOutData(const std::string_view& name)
             directoryPath += "/";
 
         std::string filePath = fmt::format("{}{}/{}", directoryPath, config.outDirectoryPath, name.empty() ? cppName : name);
+
+        // Make sure the output directory exists, fopen used to fail silently
+        // here and crash on a null file pointer.
+        std::error_code ec;
+        std::filesystem::create_directories(std::filesystem::path(filePath).parent_path(), ec);
+
         FILE* f = fopen(filePath.c_str(), "rb");
         if (f)
         {
@@ -2646,7 +2767,7 @@ void Recompiler::SaveCurrentOutData(const std::string_view& name)
 
             fseek(f, 0, SEEK_END);
             long fileSize = ftell(f);
-            if (fileSize == out.size())
+            if (fileSize >= 0 && size_t(fileSize) == out.size())
             {
                 fseek(f, 0, SEEK_SET);
                 temp.resize(fileSize);
@@ -2660,6 +2781,12 @@ void Recompiler::SaveCurrentOutData(const std::string_view& name)
         if (shouldWrite)
         {
             f = fopen(filePath.c_str(), "wb");
+            if (f == nullptr)
+            {
+                fmt::println("ERROR: Unable to open '{}' for writing. Make sure the output directory path in the TOML file is valid and writable.", filePath);
+                std::exit(EXIT_FAILURE);
+            }
+
             fwrite(out.data(), 1, out.size(), f);
             fclose(f);
         }

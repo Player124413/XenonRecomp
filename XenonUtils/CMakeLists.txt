@@ -1,6 +1,7 @@
 project("XenonUtils")
 
 add_library(XenonUtils
+    "crt_helpers.cpp" 
     "disasm.cpp" 
     "xex.cpp" 
     "image.cpp" 
@@ -29,4 +30,5 @@ target_include_directories(XenonUtils
 target_link_libraries(XenonUtils 
     PUBLIC
         disasm
+        fmt::fmt
 )

@@ -1,0 +1,83 @@
+name: Build
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang ninja-build
+
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+          -DCMAKE_C_COMPILER=clang
+          -DCMAKE_CXX_COMPILER=clang++
+
+      - name: Build
+        run: cmake --build build -j4
+
+      - name: Run synthetic test suite
+        env:
+          # The suite compile-checks its generated C++ with this compiler.
+          ZIG_CXX: clang++
+        run: bash tests/synthetic/run_tests.sh
+
+      - name: Upload test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: synthetic-test-logs
+          path: tests/synthetic/out/*.log
+          if-no-files-found: ignore
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: xenonrecomp-linux
+          path: |
+            build/XenonRecomp/XenonRecomp
+            build/XenonAnalyse/XenonAnalyse
+
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Configure
+        run: >
+          cmake -S . -B build -T ClangCL
+          -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+
+      - name: Build
+        run: cmake --build build --config Release -j4
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: xenonrecomp-windows
+          path: |
+            build/XenonRecomp/Release/XenonRecomp.exe
+            build/XenonAnalyse/Release/XenonAnalyse.exe
+            build/XenonRecomp/XenonRecomp.exe
+            build/XenonAnalyse/XenonAnalyse.exe
+          if-no-files-found: warn

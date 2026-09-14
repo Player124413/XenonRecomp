@@ -12,8 +12,27 @@ void Image::Map(const std::string_view& name, size_t base, uint32_t size, uint8_
 
 const void* Image::Find(size_t address) const
 {
-    const auto section = std::prev(sections.upper_bound(address));
-    return section->data + (address - section->base);
+    const Section* section = FindSection(address);
+    return section != nullptr ? section->data + (address - section->base) : nullptr;
+}
+
+const Section* Image::FindSection(size_t address) const
+{
+    // std::prev on begin() is undefined behavior, and addresses outside of any
+    // section used to return wild pointers. Both cases now return nullptr.
+    const auto it = sections.upper_bound(address);
+    if (it == sections.begin())
+    {
+        return nullptr;
+    }
+
+    const auto section = std::prev(it);
+    if (address < section->base || address >= section->base + section->size)
+    {
+        return nullptr;
+    }
+
+    return &*section;
 }
 
 const Section* Image::Find(const std::string_view& name) const
@@ -31,6 +50,11 @@ const Section* Image::Find(const std::string_view& name) const
 
 Image Image::ParseImage(const uint8_t* data, size_t size)
 {
+    if (data == nullptr || size < 4)
+    {
+        return {};
+    }
+
     if (data[0] == ELFMAG0 && data[1] == ELFMAG1 && data[2] == ELFMAG2 && data[3] == ELFMAG3)
     {
         return ElfLoadImage(data, size);

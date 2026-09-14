@@ -38,14 +38,8 @@ void RecompilerConfig::Load(const std::string_view& configFilePath)
         longJmpAddress = main["longjmp_address"].value_or(0u);
         setJmpAddress = main["setjmp_address"].value_or(0u);
 
-        if (restGpr14Address == 0) fmt::println("ERROR: __restgprlr_14 address is unspecified");
-        if (saveGpr14Address == 0) fmt::println("ERROR: __savegprlr_14 address is unspecified");
-        if (restFpr14Address == 0) fmt::println("ERROR: __restfpr_14 address is unspecified");
-        if (saveFpr14Address == 0) fmt::println("ERROR: __savefpr_14 address is unspecified");
-        if (restVmx14Address == 0) fmt::println("ERROR: __restvmx_14 address is unspecified");
-        if (saveVmx14Address == 0) fmt::println("ERROR: __savevmx_14 address is unspecified");
-        if (restVmx64Address == 0) fmt::println("ERROR: __restvmx_64 address is unspecified");
-        if (saveVmx64Address == 0) fmt::println("ERROR: __savevmx_64 address is unspecified");
+        // NOTE: unspecified addresses are reported by Recompiler::LoadConfig,
+        // after the automatic CRT helper detection has been attempted.
 
         if (auto functionsArray = main["functions"].as_array())
         {
@@ -71,23 +65,33 @@ void RecompilerConfig::Load(const std::string_view& configFilePath)
 
         if (!switchTableFilePath.empty())
         {
-            toml::table switchToml = toml::parse_file(directoryPath + switchTableFilePath)
-#if !TOML_EXCEPTIONS
-                .table()
-#endif
-                ;
-            if (auto switchArray = switchToml["switch"].as_array())
+            const std::string fullSwitchTablePath = directoryPath + switchTableFilePath;
+            std::error_code ec;
+            if (!std::filesystem::is_regular_file(fullSwitchTablePath, ec))
             {
-                for (auto& entry : *switchArray)
+                fmt::println("WARNING: Switch table file '{}' was not found, continuing without jump table information.", fullSwitchTablePath);
+                fmt::println("         Run XenonAnalyse first to generate it if the game uses jump tables.");
+            }
+            else
+            {
+                toml::table switchToml = toml::parse_file(fullSwitchTablePath)
+#if !TOML_EXCEPTIONS
+                    .table()
+#endif
+                    ;
+                if (auto switchArray = switchToml["switch"].as_array())
                 {
-                    auto& table = *entry.as_table();
-                    RecompilerSwitchTable switchTable;
-                    switchTable.r = *table["r"].value<uint32_t>();
-                    for (auto& label : *table["labels"].as_array())
+                    for (auto& entry : *switchArray)
                     {
-                        switchTable.labels.push_back(*label.value<uint32_t>());
+                        auto& table = *entry.as_table();
+                        RecompilerSwitchTable switchTable;
+                        switchTable.r = *table["r"].value<uint32_t>();
+                        for (auto& label : *table["labels"].as_array())
+                        {
+                            switchTable.labels.push_back(*label.value<uint32_t>());
+                        }
+                        switchTables.emplace(*table["base"].value<uint32_t>(), std::move(switchTable));
                     }
-                    switchTables.emplace(*table["base"].value<uint32_t>(), std::move(switchTable));
                 }
             }
         }

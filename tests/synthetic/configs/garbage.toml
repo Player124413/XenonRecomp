@@ -1,0 +1,13 @@
+[main]
+file_path = "../cases/garbage.bin"
+out_directory_path = "../out/ppc_garbage"
+switch_table_file_path = "../out/switch_tables.toml"
+
+restgprlr_14_address = 0x82001098
+savegprlr_14_address = 0x820010ec
+restfpr_14_address = 0x8200113c
+savefpr_14_address = 0x82001188
+restvmx_14_address = 0x820011d4
+savevmx_14_address = 0x82001268
+restvmx_64_address = 0x820012fc
+savevmx_64_address = 0x82001500

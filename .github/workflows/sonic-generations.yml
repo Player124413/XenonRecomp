@@ -1,0 +1,104 @@
+name: Sonic Generations
+
+# Recompiles Sonic Generations (Xbox 360) into portable C++ sources.
+#
+# The game executable cannot be stored in this repository. When you dispatch
+# this workflow, tell it where to fetch YOUR legally dumped, DECRYPTED
+# default.xex from:
+#
+#   release:latest  - asset "default.xex" of the latest release of this repo
+#                     (create a release in your fork and attach the file)
+#   release:<tag>   - asset "default.xex" of the release with the given tag
+#   url:<https://…> - any direct download URL you control
+#
+# The generated C++ sources are uploaded as the "sonic-generations-ppc"
+# artifact. See SonicGenerations/README.md for details.
+
+on:
+  workflow_dispatch:
+    inputs:
+      xex_source:
+        description: "Where to fetch default.xex: 'release:latest', 'release:<tag>' or 'url:<https://...>'"
+        required: true
+        default: "release:latest"
+
+jobs:
+  recompile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang ninja-build zip
+
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+          -DCMAKE_C_COMPILER=clang
+          -DCMAKE_CXX_COMPILER=clang++
+
+      - name: Build
+        run: cmake --build build -j4
+
+      - name: Fetch default.xex
+        env:
+          GH_TOKEN: ${{ github.token }}
+          XEX_SOURCE: ${{ inputs.xex_source }}
+        run: |
+          set -euo pipefail
+          cd SonicGenerations
+          case "$XEX_SOURCE" in
+            release:latest)
+              gh release download --repo "$GITHUB_REPOSITORY" --pattern 'default.xex' --dir . || {
+                echo "::error::No release asset named 'default.xex' was found in the latest release of this repository."
+                echo "Create a release in your fork, attach your decrypted default.xex as an asset, and re-run,"
+                echo "or dispatch with xex_source=url:<direct-download-url>."
+                exit 1
+              }
+              ;;
+            release:*)
+              TAG="${XEX_SOURCE#release:}"
+              gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern 'default.xex' --dir .
+              ;;
+            url:*)
+              URL="${XEX_SOURCE#url:}"
+              curl -fL --retry 3 -o default.xex "$URL"
+              ;;
+            *)
+              echo "::error::Unsupported xex_source '$XEX_SOURCE'. Use 'release:latest', 'release:<tag>' or 'url:<https://...>'."
+              exit 1
+              ;;
+          esac
+          ls -la default.xex
+
+      - name: Detect jump tables (XenonAnalyse)
+        run: build/XenonAnalyse/XenonAnalyse SonicGenerations/default.xex SonicGenerations/switch_tables.toml
+
+      - name: Recompile to C++ (XenonRecomp)
+        shell: bash
+        run: build/XenonRecomp/XenonRecomp SonicGenerations/config.toml XenonUtils/ppc_context.h 2>&1 | tee recompile.log
+
+      - name: CRT helper detection summary
+        run: grep -E "Auto-detected" recompile.log || echo "No CRT helpers were auto-detected (they may be pinned in config.toml)."
+
+      - name: Package output
+        run: |
+          cd SonicGenerations
+          test -d ppc
+          zip -r -1 ../sonic-generations-ppc.zip ppc switch_tables.toml config.toml
+
+      - name: Upload generated C++
+        uses: actions/upload-artifact@v4
+        with:
+          name: sonic-generations-ppc
+          path: sonic-generations-ppc.zip
+          compression-level: 0
+          if-no-files-found: error

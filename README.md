@@ -6,6 +6,10 @@ This project was heavily inspired by [N64: Recompiled](https://github.com/N64Rec
 
 **DISCLAIMER:** This project does not provide a runtime implementation. It only converts the game code to C++, which is not going to function correctly without a runtime backing it. **Making the game work is your responsibility.**
 
+## Sonic Generations
+
+The repository includes a ready-to-use pipeline for **Sonic Generations (Xbox 360)** in [`SonicGenerations/`](SonicGenerations): put your own legally dumped, decrypted `default.xex` into that folder and run `run_unix.sh` / `run_windows.bat`, or dispatch the **Sonic Generations** GitHub workflow. The addresses of the CRT register save/restore helpers are detected automatically, so no manual address lookup is required. See [SonicGenerations/README.md](SonicGenerations/README.md) (English + Русский) for details.
+
 ## Implementation Details
 
 ### Instructions
@@ -124,7 +128,7 @@ Property|Description
 file_path|Path to the XEX file.
 patch_file_path|Path to the XEXP file. This is not required if the game has no title updates.
 patched_file_path|Path to the patched XEX file. XenonRecomp will create this file automatically if it is missing and reuse it in subsequent recompilations. It does nothing if no XEXP file is specified. You can pass this output file to XenonAnalyse.
-out_directory_path|Path to the directory that will contain the output C++ code. This directory must exist before running the recompiler.
+out_directory_path|Path to the directory that will contain the output C++ code. The directory is created automatically if it does not exist.
 switch_table_file_path|Path to the TOML file containing the jump table definitions. The recompiler uses this file to convert jump tables to real switch cases.
 
 #### Optimizations
@@ -155,7 +159,9 @@ restvmx_64_address = 0x831B377C
 savevmx_64_address = 0x831B34E4
 ```
 
-Xbox 360 binaries feature specialized register restore & save functions that act similarly to switch case fallthroughs. Every function that utilizes non-volatile registers either has an inlined version of these functions or explicitly calls them. The recompiler requires the starting address of each restore/save function in the TOML file to recompile them correctly. These functions could likely be auto-detected, but there is currently no mechanism for it.
+Xbox 360 binaries feature specialized register restore & save functions that act similarly to switch case fallthroughs. Every function that utilizes non-volatile registers either has an inlined version of these functions or explicitly calls them. The recompiler requires the starting address of each restore/save function to recompile them correctly.
+
+**These functions are now detected automatically.** The recompiler scans the code sections for their characteristic instruction sequences (for example, `__restgprlr_14` is a run of `ld r14`–`ld r31` from a fixed base register) and prints every address it finds, e.g. `Auto-detected __restgprlr_14 at 0x831B0B40`. The TOML properties below are optional: specify them only to override a detection result or to keep an existing configuration pinned. The byte patterns are still useful for verifying the detected addresses manually.
 
 Property|Description|Byte Pattern
 -|-|-
@@ -246,6 +252,16 @@ XenonRecomp [input testing directory path] [input PPC context header file path] 
 ```
 
 Once the files are generated, refresh XenonTests' CMake cache to make them appear in the project. The tests can then be executed to compare the results of instructions against the expected values.
+
+### Synthetic Tests
+
+`tests/synthetic/` contains a self-contained regression suite that requires no game files. It generates small synthetic XEX images with `gen_xex.py` (valid, corrupt headers, out-of-bounds image sizes, zero-padded `.pdata`, unsupported compression, raw garbage, …), runs both tools against them and verifies that every case either succeeds cleanly or fails with a clear error message — never a crash, hang or out-of-memory condition:
+
+```
+bash tests/synthetic/run_tests.sh
+```
+
+The suite also verifies the automatic detection of the CRT register save/restore helpers and compile-checks the generated C++. It runs in CI on every push and pull request (see `.github/workflows/build.yml`).
 
 ## Building
 

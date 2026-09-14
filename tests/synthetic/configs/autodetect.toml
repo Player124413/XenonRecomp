@@ -1,0 +1,4 @@
+[main]
+file_path = "../cases/valid.xex"
+out_directory_path = "../out/ppc_autodetect"
+switch_table_file_path = "../out/switch_tables.toml"

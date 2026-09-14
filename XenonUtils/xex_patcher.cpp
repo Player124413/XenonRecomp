@@ -222,21 +222,61 @@ static int lzxDeltaApplyPatch(const Xex2DeltaPatch *deltaPatch, uint32_t patchLe
     return 0;
 }
 
+// The Xbox 360 has 512 MB of RAM, anything past this limit is guaranteed to be
+// the result of a corrupt header and would blow up with std::bad_alloc.
+static const size_t MaxPatchedImageSize = 1ull * 1024 * 1024 * 1024;
+
+static bool ValidateXex2Headers(const uint8_t *bytes, size_t bytesSize)
+{
+    static const char Xex2Magic[] = "XEX2";
+    if (bytes == nullptr || bytesSize < sizeof(Xex2Header))
+    {
+        return false;
+    }
+
+    if (memcmp(bytes, Xex2Magic, 4) != 0)
+    {
+        return false;
+    }
+
+    const Xex2Header *header = (const Xex2Header *)(bytes);
+
+    const uint32_t headerSize = header->headerSize;
+    if (headerSize < sizeof(Xex2Header) || headerSize > bytesSize)
+    {
+        return false;
+    }
+
+    const uint32_t securityOffset = header->securityOffset;
+    if (securityOffset > bytesSize || bytesSize - securityOffset < sizeof(Xex2SecurityInfo))
+    {
+        return false;
+    }
+
+    if (sizeof(Xex2Header) + size_t(header->headerCount.get()) * sizeof(Xex2OptHeader) > headerSize)
+    {
+        return false;
+    }
+
+    return true;
+}
+
 XexPatcher::Result XexPatcher::apply(const uint8_t* xexBytes, size_t xexBytesSize, const uint8_t* patchBytes, size_t patchBytesSize, std::vector<uint8_t> &outBytes, bool skipData)
 {
     // Validate headers.
-    static const char Xex2Magic[] = "XEX2";
-    const Xex2Header *xexHeader = (const Xex2Header *)(xexBytes);
-    if (memcmp(xexBytes, Xex2Magic, 4) != 0)
+    if (!ValidateXex2Headers(xexBytes, xexBytesSize))
     {
         return Result::XexFileInvalid;
     }
 
-    const Xex2Header *patchHeader = (const Xex2Header *)(patchBytes);
-    if (memcmp(patchBytes, Xex2Magic, 4) != 0)
+    const Xex2Header *xexHeader = (const Xex2Header *)(xexBytes);
+
+    if (!ValidateXex2Headers(patchBytes, patchBytesSize))
     {
         return Result::PatchFileInvalid;
     }
+
+    const Xex2Header *patchHeader = (const Xex2Header *)(patchBytes);
 
     if ((patchHeader->moduleFlags & (XEX_MODULE_MODULE_PATCH | XEX_MODULE_PATCH_DELTA | XEX_MODULE_PATCH_FULL)) == 0)
     {
@@ -245,13 +285,15 @@ XexPatcher::Result XexPatcher::apply(const uint8_t* xexBytes, size_t xexBytesSiz
 
     // Validate patch.
     const Xex2OptDeltaPatchDescriptor *patchDescriptor = (const Xex2OptDeltaPatchDescriptor *)(getOptHeaderPtr(patchBytes, XEX_HEADER_DELTA_PATCH_DESCRIPTOR));
-    if (patchDescriptor == nullptr)
+    if (patchDescriptor == nullptr ||
+        reinterpret_cast<const uint8_t *>(patchDescriptor) + sizeof(Xex2OptDeltaPatchDescriptor) > patchBytes + patchBytesSize)
     {
         return Result::PatchFileInvalid;
     }
     
     const Xex2OptFileFormatInfo *patchFileFormatInfo = (const Xex2OptFileFormatInfo *)(getOptHeaderPtr(patchBytes, XEX_HEADER_FILE_FORMAT_INFO));
-    if (patchFileFormatInfo == nullptr)
+    if (patchFileFormatInfo == nullptr ||
+        reinterpret_cast<const uint8_t *>(patchFileFormatInfo) + sizeof(Xex2OptFileFormatInfo) > patchBytes + patchBytesSize)
     {
         return Result::PatchFileInvalid;
     }
@@ -289,6 +331,19 @@ XexPatcher::Result XexPatcher::apply(const uint8_t* xexBytes, size_t xexBytesSiz
         headerTargetSize = patchDescriptor->deltaHeadersTargetOffset + patchDescriptor->deltaHeadersSourceSize;
     }
 
+    if (headerTargetSize > xexBytesSize)
+    {
+        return Result::PatchIncompatible;
+    }
+
+    // The delta patch data must be fully contained within the patch file,
+    // otherwise applying it would read out of bounds.
+    const uint8_t *patchInfoBytes = reinterpret_cast<const uint8_t *>(&patchDescriptor->info);
+    if (patchDescriptor->size > patchBytesSize || patchInfoBytes + patchDescriptor->size.get() > patchBytes + patchBytesSize)
+    {
+        return Result::PatchFileInvalid;
+    }
+
     // Create the bytes for the new XEX header. Copy over the existing data.
     uint32_t newXexHeaderSize = std::max(headerTargetSize, xexHeader->headerSize.get());
     outBytes.resize(newXexHeaderSize);
@@ -312,8 +367,27 @@ XexPatcher::Result XexPatcher::apply(const uint8_t* xexBytes, size_t xexBytesSiz
     newXexHeader = (Xex2Header *)(outBytes.data());
 
     // Copy the rest of the data.
+    if (newXexHeader->securityOffset + sizeof(Xex2SecurityInfo) > outBytes.size())
+    {
+        return Result::PatchFailed;
+    }
+
     const Xex2SecurityInfo *newSecurityInfo = (const Xex2SecurityInfo *)(&outBytes[newXexHeader->securityOffset]);
-    outBytes.resize(outBytes.size() + newSecurityInfo->imageSize);
+
+    const uint32_t newImageSize = newSecurityInfo->imageSize;
+    if (newImageSize == 0 || newImageSize > MaxPatchedImageSize)
+    {
+        return Result::PatchFailed;
+    }
+
+    // The untouched data of the base XEX must fit into the new image, otherwise
+    // the resize below would under-allocate and the memcpy would overflow.
+    if (xexBytesSize - xexHeader->headerSize > newImageSize)
+    {
+        return Result::XexFileInvalid;
+    }
+
+    outBytes.resize(outBytes.size() + newImageSize);
     memset(&outBytes[headerTargetSize], 0, outBytes.size() - headerTargetSize);
     memcpy(&outBytes[headerTargetSize], &xexBytes[xexHeader->headerSize], xexBytesSize - xexHeader->headerSize);
     newXexHeader = (Xex2Header *)(outBytes.data());
@@ -359,7 +433,8 @@ XexPatcher::Result XexPatcher::apply(const uint8_t* xexBytes, size_t xexBytesSiz
     
     // Decrypt base XEX if necessary.
     const Xex2OptFileFormatInfo *fileFormatInfo = (const Xex2OptFileFormatInfo *)(getOptHeaderPtr(xexBytes, XEX_HEADER_FILE_FORMAT_INFO));
-    if (fileFormatInfo == nullptr)
+    if (fileFormatInfo == nullptr ||
+        reinterpret_cast<const uint8_t *>(fileFormatInfo) + sizeof(Xex2OptFileFormatInfo) > xexBytes + xexBytesSize)
     {
         return Result::XexFileInvalid;
     }
@@ -379,6 +454,11 @@ XexPatcher::Result XexPatcher::apply(const uint8_t* xexBytes, size_t xexBytesSiz
     {
         const Xex2FileBasicCompressionBlock *blocks = &((const Xex2FileBasicCompressionInfo*)(fileFormatInfo + 1))->firstBlock;
         int32_t numBlocks = (fileFormatInfo->infoSize / sizeof(Xex2FileBasicCompressionBlock)) - 1;
+        if (numBlocks <= 0 || size_t(numBlocks) > xexBytesSize / sizeof(Xex2FileBasicCompressionBlock))
+        {
+            return Result::XexFileInvalid;
+        }
+
         int32_t baseCompressedSize = 0;
         int32_t baseImageSize = 0;
         for (int32_t i = 0; i < numBlocks; i++) {
@@ -405,7 +485,13 @@ XexPatcher::Result XexPatcher::apply(const uint8_t* xexBytes, size_t xexBytesSiz
     }
     else if (fileFormatInfo->compressionType == XEX_COMPRESSION_NORMAL)
     {
-        const Xex2CompressedBlockInfo* blocks = &((const Xex2FileNormalCompressionInfo*)(fileFormatInfo + 1))->firstBlock;
+        const Xex2FileNormalCompressionInfo *normalInfo = (const Xex2FileNormalCompressionInfo*)(fileFormatInfo + 1);
+        if (reinterpret_cast<const uint8_t *>(normalInfo) + sizeof(Xex2FileNormalCompressionInfo) > xexBytes + xexBytesSize)
+        {
+            return Result::XexFileInvalid;
+        }
+
+        const Xex2CompressedBlockInfo* blocks = &normalInfo->firstBlock;
         const uint32_t exeLength = xexBytesSize - xexHeader->headerSize.get();
         const uint8_t* exeBuffer = &outBytes[headerTargetSize];
 
@@ -418,8 +504,15 @@ XexPatcher::Result XexPatcher::apply(const uint8_t* xexBytes, size_t xexBytesSiz
         d = compressBuffer.get();
 
         uint8_t blockCalcedDigest[0x14];
+        const uint8_t *exeEnd = exeBuffer + exeLength;
         while (blocks->blockSize) 
         {
+            if (blocks->blockSize.get() < sizeof(Xex2CompressedBlockInfo) ||
+                p < exeBuffer || p + blocks->blockSize.get() > exeEnd)
+            {
+                return Result::PatchFailed;
+            }
+
             const uint8_t* pNext = p + blocks->blockSize;
             const auto* nextBlock = (const Xex2CompressedBlockInfo*)p;
 

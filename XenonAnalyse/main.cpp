@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cassert>
 #include <iterator>
 #include <file.h>
@@ -21,19 +22,53 @@ struct SwitchTable
     uint32_t type{};
 };
 
-void ReadTable(Image& image, SwitchTable& table)
+// Helper that safely disassembles one instruction at a virtual address.
+// Returns false if the address is not mapped or the instruction is invalid,
+// both of which used to crash here through null pointer dereferences.
+static bool SafeDisassemble(Image& image, size_t address, ppc_insn& insn)
 {
+    const auto* ptr = (uint32_t*)image.Find(address);
+    if (ptr == nullptr)
+        return false;
+
+    ppc::Disassemble(ptr, address, insn);
+    return insn.opcode != nullptr;
+}
+
+// Validates that [address, address + byteCount) is fully mapped in the image.
+static bool IsRegionMapped(Image& image, size_t address, size_t byteCount)
+{
+    const Section* section = image.FindSection(address);
+    return section != nullptr && address + byteCount <= section->base + section->size;
+}
+
+bool ReadTable(Image& image, SwitchTable& table)
+{
+    if (table.labels.empty())
+        return false;
+
     uint32_t pOffset;
     ppc_insn insn;
-    auto* code = (uint32_t*)image.Find(table.base);
-    ppc::Disassemble(code, table.base, insn);
+
+    // All variants read up to six words starting at the table base.
+    if (!IsRegionMapped(image, table.base, 24))
+        return false;
+
+    if (!SafeDisassemble(image, table.base, insn))
+        return false;
+
     pOffset = insn.operands[1] << 16;
 
-    ppc::Disassemble(code + 1, table.base + 4, insn);
+    if (!SafeDisassemble(image, table.base + 4, insn))
+        return false;
+
     pOffset += insn.operands[2];
 
     if (table.type == SWITCH_ABSOLUTE)
     {
+        if (!IsRegionMapped(image, pOffset, table.labels.size() * sizeof(uint32_t)))
+            return false;
+
         const auto* offsets = (be<uint32_t>*)image.Find(pOffset);
         for (size_t i = 0; i < table.labels.size(); i++)
         {
@@ -42,18 +77,31 @@ void ReadTable(Image& image, SwitchTable& table)
     }
     else if (table.type == SWITCH_COMPUTED)
     {
+        if (!IsRegionMapped(image, pOffset, table.labels.size() * sizeof(uint8_t)))
+            return false;
+
         uint32_t base;
         uint32_t shift;
         const auto* offsets = (uint8_t*)image.Find(pOffset);
 
-        ppc::Disassemble(code + 4, table.base + 0x10, insn);
+        if (!SafeDisassemble(image, table.base + 0x10, insn))
+            return false;
+
         base = insn.operands[1] << 16;
 
-        ppc::Disassemble(code + 5, table.base + 0x14, insn);
+        if (!SafeDisassemble(image, table.base + 0x14, insn))
+            return false;
+
         base += insn.operands[2];
 
-        ppc::Disassemble(code + 3, table.base + 0x0C, insn);
+        if (!SafeDisassemble(image, table.base + 0x0C, insn))
+            return false;
+
         shift = insn.operands[2];
+
+        // A shift that large can only come from misdetected data.
+        if (shift > 24)
+            return false;
 
         for (size_t i = 0; i < table.labels.size(); i++)
         {
@@ -64,13 +112,20 @@ void ReadTable(Image& image, SwitchTable& table)
     {
         if (table.type == SWITCH_BYTEOFFSET)
         {
+            if (!IsRegionMapped(image, pOffset, table.labels.size() * sizeof(uint8_t)))
+                return false;
+
             const auto* offsets = (uint8_t*)image.Find(pOffset);
             uint32_t base;
 
-            ppc::Disassemble(code + 3, table.base + 0x0C, insn);
+            if (!SafeDisassemble(image, table.base + 0x0C, insn))
+                return false;
+
             base = insn.operands[1] << 16;
 
-            ppc::Disassemble(code + 4, table.base + 0x10, insn);
+            if (!SafeDisassemble(image, table.base + 0x10, insn))
+                return false;
+
             base += insn.operands[2];
 
             for (size_t i = 0; i < table.labels.size(); i++)
@@ -80,13 +135,20 @@ void ReadTable(Image& image, SwitchTable& table)
         }
         else if (table.type == SWITCH_SHORTOFFSET)
         {
+            if (!IsRegionMapped(image, pOffset, table.labels.size() * sizeof(uint16_t)))
+                return false;
+
             const auto* offsets = (be<uint16_t>*)image.Find(pOffset);
             uint32_t base;
 
-            ppc::Disassemble(code + 4, table.base + 0x10, insn);
+            if (!SafeDisassemble(image, table.base + 0x10, insn))
+                return false;
+
             base = insn.operands[1] << 16;
 
-            ppc::Disassemble(code + 5, table.base + 0x14, insn);
+            if (!SafeDisassemble(image, table.base + 0x14, insn))
+                return false;
+
             base += insn.operands[2];
 
             for (size_t i = 0; i < table.labels.size(); i++)
@@ -98,14 +160,21 @@ void ReadTable(Image& image, SwitchTable& table)
     else
     {
         assert(false);
+        return false;
     }
+
+    return true;
 }
 
-void ScanTable(const uint32_t* code, size_t base, SwitchTable& table)
+void ScanTable(const uint32_t* code, size_t base, SwitchTable& table, size_t wordsBack)
 {
     ppc_insn insn;
     uint32_t cr{ (uint32_t)-1 };
-    for (int i = 0; i < 32; i++)
+
+    // Never scan further back than the start of the section. Matches near the
+    // very beginning used to make code[-i] read out of bounds.
+    const int count = (int)std::min<size_t>(32, wordsBack);
+    for (int i = 0; i < count; i++)
     {
         ppc::Disassemble(&code[-i], base - (4 * i), insn);
         if (insn.opcode == nullptr)
@@ -156,6 +225,11 @@ void* SearchMask(const void* source, const uint32_t* compare, size_t compareCoun
         size_t c = 0;
         for (c = 0; c < compareCount; c++)
         {
+            if (i + c >= count)
+            {
+                break;
+            }
+
             ppc::Disassemble(&src[i + c], 0, insn);
             if (insn.opcode == nullptr || insn.opcode->id != compare[c])
             {
@@ -190,7 +264,18 @@ int main(int argc, char** argv)
     }
 
     const auto file = LoadFile(argv[1]);
+    if (file.empty())
+    {
+        fprintf(stderr, "ERROR: Unable to load the file '%s', make sure it exists.\n", argv[1]);
+        return EXIT_FAILURE;
+    }
+
     auto image = Image::ParseImage(file.data(), file.size());
+    if (image.data == nullptr || image.sections.empty())
+    {
+        fprintf(stderr, "ERROR: Unable to parse '%s', no image sections were loaded. The file must be a decrypted XEX2 or ELF executable.\n", argv[1]);
+        return EXIT_FAILURE;
+    }
 
     auto printTable = [&](const SwitchTable& table)
         {
@@ -233,14 +318,20 @@ int main(int argc, char** argv)
                     {
                         SwitchTable table{};
                         table.type = type;
-                        ScanTable((uint32_t*)data, base + (data - dataStart), table);
+                        ScanTable((uint32_t*)data, base + (data - dataStart), table, (data - dataStart) / 4);
 
                         // fmt::println("{:X} ; jmptable - {}", base + (data - dataStart), table.labels.size());
                         if (table.base != 0)
                         {
-                            ReadTable(image, table);
-                            printTable(table);
-                            switches.emplace_back(std::move(table));
+                            if (ReadTable(image, table))
+                            {
+                                printTable(table);
+                                switches.emplace_back(std::move(table));
+                            }
+                            else
+                            {
+                                fmt::println("WARNING: Ignoring a jump table candidate at 0x{:X}, its table data is not mapped in the image.", table.base);
+                            }
                         }
 
                         data += 4;
@@ -305,8 +396,19 @@ int main(int argc, char** argv)
     scanPattern(offsetSwitch, std::size(offsetSwitch), SWITCH_BYTEOFFSET);
     scanPattern(wordOffsetSwitch, std::size(wordOffsetSwitch), SWITCH_SHORTOFFSET);
 
+    std::error_code ec;
+    std::filesystem::create_directories(std::filesystem::path(argv[2]).parent_path(), ec);
+
     std::ofstream f(argv[2]);
+    if (!f.is_open())
+    {
+        fprintf(stderr, "ERROR: Unable to open '%s' for writing.\n", argv[2]);
+        return EXIT_FAILURE;
+    }
+
     f.write(out.data(), out.size());
+
+    fmt::println("Found {} jump table(s), written to '{}'.", switches.size(), argv[2]);
 
     return EXIT_SUCCESS;
 }
