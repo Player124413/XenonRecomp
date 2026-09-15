@@ -35,15 +35,15 @@ This folder contains everything needed to convert the **Xbox 360 executable of S
 
 ### Using GitHub Actions instead
 
-The repository ships a **`Sonic Generations` workflow** (`.github/workflows/sonic-generations.yml`). Because the game file cannot be stored in the repository, you give the workflow a source to fetch it from when you start it (Actions tab → *Sonic Generations* → *Run workflow*):
+The repository ships a **`Sonic Generations` workflow** (`.github/workflows/sonic-generations.yml`). Because the game file cannot be stored in the repository, start the workflow (Actions tab → *Sonic Generations* → *Run workflow*) and **paste a direct link to your decrypted `default.xex`** into the `xex_source` field — that's it. Google Drive links (shared as "Anyone with the link") work too.
 
-| `xex_source` input | Meaning |
+| `xex_source` | Meaning |
 |---|---|
-| `release:latest` (default) | Download `default.xex` from the latest release of **your fork** — create a private release and attach your decrypted XEX as an asset named `default.xex`. |
+| `https://…` — a plain link | The workflow downloads `default.xex` from that URL. The link must be a *direct* download (returning the file itself, not a web page). Google Drive links are handled automatically. |
+| `release:latest` | Download `default.xex` from the latest release of **your fork** — create a release and attach your decrypted XEX as an asset named `default.xex`. |
 | `release:<tag>` | Same, but from a specific release tag. |
-| `url:<https://…>` | Direct download URL that you control (e.g. a private file share). |
 
-The workflow builds the tools, detects jump tables, recompiles the game and uploads the generated `ppc/` directory as an artifact (**`sonic-generations-ppc`**). No game data is ever committed to the repository.
+After the download the file is validated (it must be a real XEX2/ELF executable), then the workflow builds the tools, detects jump tables, recompiles the game and uploads the generated `ppc/` directory as an artifact (**`sonic-generations-ppc`**). No game data is ever committed to the repository.
 
 ## Быстрый старт (Русский)
 
@@ -69,15 +69,15 @@ The workflow builds the tools, detects jump tables, recompiles the game and uplo
 
 ### Через GitHub Actions
 
-В репозитории есть workflow **`Sonic Generations`** (`.github/workflows/sonic-generations.yml`). Так как игровой файл нельзя хранить в репозитории, при запуске workflow (вкладка Actions → *Sonic Generations* → *Run workflow*) укажите, откуда его взять:
+В репозитории есть workflow **`Sonic Generations`** (`.github/workflows/sonic-generations.yml`). Так как игровой файл нельзя хранить в репозитории, при запуске workflow (вкладка Actions → *Sonic Generations* → *Run workflow*) **просто вставьте прямую ссылку на ваш расшифрованный `default.xex`** в поле `xex_source` — и всё. Ссылки на Google Drive (с доступом «Все, у кого есть ссылка») тоже поддерживаются.
 
-| Параметр `xex_source` | Значение |
+| `xex_source` | Значение |
 |---|---|
-| `release:latest` (по умолчанию) | Скачать `default.xex` из последнего релиза **вашего форка** — создайте приватный релиз и прикрепите свой расшифрованный XEX как файл с именем `default.xex`. |
+| `https://…` — обычная ссылка | Workflow скачает `default.xex` по этой ссылке. Ссылка должна быть *прямой* (отдавать сам файл, а не веб-страницу). Google Drive обрабатывается автоматически. |
+| `release:latest` | Скачать `default.xex` из последнего релиза **вашего форка** — создайте релиз и прикрепите свой расшифрованный XEX как файл с именем `default.xex`. |
 | `release:<tag>` | То же, но из конкретного тега релиза. |
-| `url:<https://…>` | Прямая ссылка для скачивания, которую контролируете вы (например, приватное файлохранилище). |
 
-Workflow соберёт инструменты, найдёт jump-таблицы, перекомпилирует игру и выложит папку `ppc/` как артефакт (**`sonic-generations-ppc`**). Игровые данные в репозиторий не попадают.
+После скачивания файл проверяется (это должен быть настоящий XEX2/ELF), затем workflow соберёт инструменты, найдёт jump-таблицы, перекомпилирует игру и выложит папку `ppc/` как артефакт (**`sonic-generations-ppc`**). Игровые данные в репозиторий не попадают.
 
 ---
 
