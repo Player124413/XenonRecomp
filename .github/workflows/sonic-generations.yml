@@ -114,14 +114,48 @@ jobs:
           ls -la default.xex
 
       - name: Detect jump tables (XenonAnalyse)
-        run: build/XenonAnalyse/XenonAnalyse SonicGenerations/default.xex SonicGenerations/switch_tables.toml
+        shell: bash
+        run: build/XenonAnalyse/XenonAnalyse SonicGenerations/default.xex SonicGenerations/switch_tables.toml 2>&1 | tee analyse.log
 
       - name: Recompile to C++ (XenonRecomp)
         shell: bash
         run: build/XenonRecomp/XenonRecomp SonicGenerations/config.toml XenonUtils/ppc_context.h 2>&1 | tee recompile.log
 
-      - name: CRT helper detection summary
-        run: grep -E "Auto-detected" recompile.log || echo "No CRT helpers were auto-detected (they may be pinned in config.toml)."
+      - name: Log summary
+        if: always()
+        run: |
+          count() {
+            local n
+            n=$(grep -c "$1" "$2" 2>/dev/null)
+            echo "${n:-0}"
+          }
+          echo "=== CRT helpers auto-detected ==="
+          grep -E "Auto-detected" recompile.log 2>/dev/null || echo "(none)"
+          echo ""
+          echo "=== Warnings / errors ==="
+          echo "analyse.log:   $(count WARNING analyse.log) warning(s), $(count ERROR analyse.log) error(s)"
+          echo "recompile.log: $(count WARNING recompile.log) warning(s), $(count ERROR recompile.log) error(s)"
+          echo ""
+          echo "=== First errors/warnings of recompile.log (up to 20) ==="
+          if [ -f recompile.log ]; then
+              found=$(grep -E "ERROR|WARNING" recompile.log | head -20)
+              if [ -n "$found" ]; then echo "$found"; else echo "(none)"; fi
+          else
+              echo "(no log)"
+          fi
+          echo ""
+          echo "=== Last 30 lines of recompile.log ==="
+          tail -n 30 recompile.log 2>/dev/null || echo "(no log)"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sonic-generations-logs
+          path: |
+            analyse.log
+            recompile.log
+          if-no-files-found: ignore
 
       - name: Package output
         run: |

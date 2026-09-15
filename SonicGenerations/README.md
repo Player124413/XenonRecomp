@@ -43,7 +43,7 @@ The repository ships a **`Sonic Generations` workflow** (`.github/workflows/soni
 | `release:latest` | Download `default.xex` from the latest release of **your fork** — create a release and attach your decrypted XEX as an asset named `default.xex`. |
 | `release:<tag>` | Same, but from a specific release tag. |
 
-After the download the file is validated (it must be a real XEX2/ELF executable), then the workflow builds the tools, detects jump tables, recompiles the game and uploads the generated `ppc/` directory as an artifact (**`sonic-generations-ppc`**). No game data is ever committed to the repository.
+After the download the file is validated (it must be a real XEX2/ELF executable), then the workflow builds the tools, detects jump tables, recompiles the game and uploads the generated `ppc/` directory as an artifact (**`sonic-generations-ppc`**). The complete XenonAnalyse/XenonRecomp output is uploaded as the **`sonic-generations-logs`** artifact — even when a step fails — so you can always download and inspect exactly what the tools printed. No game data is ever committed to the repository.
 
 ## Быстрый старт (Русский)
 
@@ -77,7 +77,7 @@ After the download the file is validated (it must be a real XEX2/ELF executable)
 | `release:latest` | Скачать `default.xex` из последнего релиза **вашего форка** — создайте релиз и прикрепите свой расшифрованный XEX как файл с именем `default.xex`. |
 | `release:<tag>` | То же, но из конкретного тега релиза. |
 
-После скачивания файл проверяется (это должен быть настоящий XEX2/ELF), затем workflow соберёт инструменты, найдёт jump-таблицы, перекомпилирует игру и выложит папку `ppc/` как артефакт (**`sonic-generations-ppc`**). Игровые данные в репозиторий не попадают.
+После скачивания файл проверяется (это должен быть настоящий XEX2/ELF), затем workflow соберёт инструменты, найдёт jump-таблицы, перекомпилирует игру и выложит папку `ppc/` как артефакт (**`sonic-generations-ppc`**). Полный вывод XenonAnalyse/XenonRecomp выкладывается отдельным артефактом **`sonic-generations-logs`** — даже если какой-то шаг упал, — так что вы всегда можете скачать и посмотреть, что именно напечатали инструменты. Игровые данные в репозиторий не попадают.
 
 ---
 
