@@ -79,8 +79,8 @@ timeout "$TIMEOUT_SECS" "$ANALYSE" cases/valid.xex out/switch_tables.toml > out/
 rc=$?
 check "XenonAnalyse exits 0" $([ $rc -eq 0 ]; echo $?) "exit code $rc"
 check "XenonAnalyse no crash" "$(crash_scan out/analyse.log)" "crash markers in out/analyse.log"
-if grep -q "Found 1 jump table" out/analyse.log; then tables=0; else tables=1; fi
-check "XenonAnalyse found the jump table" $tables "output: $(tail -1 out/analyse.log)"
+if grep -q "Found 2 jump table(s)" out/analyse.log; then tables=0; else tables=1; fi
+check "XenonAnalyse found the jump tables" $tables "output: $(tail -1 out/analyse.log)"
 
 note ""
 note "=== XenonAnalyse on garbage.bin ==="
@@ -128,7 +128,7 @@ run_err_case() { # run_err_case <name> <config>
     check "$name prints ERROR" $(grep -q "ERROR" "$log"; echo $?) "no ERROR message in $log"
 }
 
-run_ok_case valid          configs/valid.toml
+run_ok_case valid          configs/valid.toml           "Extending function"
 run_ok_case autodetect     configs/autodetect.toml      "Auto-detected"
 run_ok_case no_pdata       configs/no_pdata.toml        "No .pdata"           tolerate_switch
 run_ok_case zero_fnlen     configs/zero_fnlen.toml

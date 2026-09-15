@@ -381,6 +381,35 @@ def build_text():
     t.mark('func_newinstrs_end')
     t.emit(blr())
 
+    # --- jump table switch with case bodies past the .pdata end ---------------
+    # Models the Sonic Generations shape: the .pdata entry stops at the default
+    # blr while the compiler placed the case bodies right after it. The
+    # recompiler must extend the function to cover them instead of erroring.
+    t.mark('func_switch2')
+    t.emit(cmplwi(6, 3, 3))
+    bgt_default2 = t.here(); t.emit(0)       # placeholder: bgt default_case2
+    lis_table2 = t.here(); t.emit(0)         # placeholder: lis r11, HI(table2)
+    addi_table2 = t.here(); t.emit(0)        # placeholder: addi r11, r11, LO(table2)
+    t.emit(rlwinm(0, 3, 2, 0, 25))           # same dispatch pattern as func_switch
+    t.emit(lwzx(0, 11, 0))
+    t.emit(mtctr(0))
+    t.emit(bctr())
+    t.mark('default_case2')
+    default_case2 = t.here()
+    t.emit(li(3, 0x2FF))
+    t.emit(blr())
+    t.mark('func_switch2_pdata_end')         # .pdata stops here...
+
+    for i in range(4):                       # ...but the case bodies follow
+        t.mark('case2_%d' % i)
+        t.emit(li(3, 0x200 + i))
+        t.emit(blr())
+
+    t.mark('func_after_switch2')             # next function must stay intact
+    t.emit(li(3, 0x400))
+    t.emit(blr())
+    t.mark('func_after_switch2_end')
+
     # --- resolve placeholders -------------------------------------------------
     words = t.words
 
@@ -400,6 +429,12 @@ def build_text():
     table_va = IMAGE_BASE + DATA_VA
     words[index_of(lis_table)] = lis(11, (table_va >> 16) & 0xFFFF)
     words[index_of(addi_table)] = addi(11, 11, table_va & 0xFFFF)
+
+    words[index_of(bgt_default2)] = bgt(bgt_default2, default_case2, cr=6)
+
+    table2_va = IMAGE_BASE + DATA_VA + 16    # second table follows the first
+    words[index_of(lis_table2)] = lis(11, (table2_va >> 16) & 0xFFFF)
+    words[index_of(addi_table2)] = addi(11, 11, table2_va & 0xFFFF)
 
     return t
 
@@ -438,11 +473,14 @@ def pe_headers(sections):
 def build_image(t, args):
     text = t.data()
 
-    # .data: jump table (4 entries) then padding
+    # .data: two jump tables (4 entries each) then padding
     jump_table = b''
     for i in range(4):
         jump_table += u32(t.symbols['case_%d' % i])
-    data = jump_table + b'\0' * (0x800 - len(jump_table))
+    jump_table2 = b''
+    for i in range(4):
+        jump_table2 += u32(t.symbols['case2_%d' % i])
+    data = jump_table + jump_table2 + b'\0' * (0x800 - len(jump_table) - len(jump_table2))
 
     # .pdata entries (BE): (BeginAddress, PrologLength | FunctionLength<<8)
     def pdata_entry(addr, instr_count, prolog=0):
@@ -460,6 +498,12 @@ def build_image(t, args):
         pdata += pdata_entry(t.symbols['func_pdata_only'], 2, 0)
     pdata += pdata_entry(t.symbols['func_newinstrs'],
                          (t.symbols['func_newinstrs_end'] + 4 - t.symbols['func_newinstrs']) // 4, 0)
+    # func_switch2: .pdata stops at the default blr while the case bodies sit
+    # past it (Sonic Generations shape); func_after_switch2 follows them.
+    pdata += pdata_entry(t.symbols['func_switch2'],
+                         (t.symbols['func_switch2_pdata_end'] - t.symbols['func_switch2']) // 4, 4)
+    pdata += pdata_entry(t.symbols['func_after_switch2'],
+                         (t.symbols['func_after_switch2_end'] - t.symbols['func_after_switch2']) // 4, 0)
     pdata += b'\0' * (0x200 - len(pdata))
 
     image_size = PDATA_VA + len(pdata)

@@ -340,6 +340,61 @@ void Recompiler::Analyse()
     }
 
     std::sort(functions.begin(), functions.end(), [](auto& lhs, auto& rhs) { return lhs.base < rhs.base; });
+
+    // A .pdata entry may end at the last blr of the switching code while the
+    // compiler placed some of its jump table case bodies just past that blr.
+    // Extend such functions to cover their trailing labels so the generated
+    // switch can goto them instead of erroring out. The case bodies were also
+    // parsed as small standalone functions by the scan; their sizes tell us
+    // where each body actually ends, so chain through them to include the
+    // full extent of the last one. Those small functions stay in the list;
+    // their code gets compiled twice (once as part of the switch, once
+    // standalone), which is harmless and keeps them callable as bl targets.
+    constexpr size_t maxSwitchExtension = 0x1000;
+
+    for (size_t i = 0; i < functions.size(); i++)
+    {
+        auto& fn = functions[i];
+
+        std::unordered_set<size_t> tailLabels;
+        size_t newEnd = 0;
+
+        for (const auto& [tableBase, table] : config.switchTables)
+        {
+            if (tableBase < fn.base || tableBase >= fn.base + fn.size)
+                continue;
+
+            for (auto label : table.labels)
+            {
+                if (label >= fn.base + fn.size)
+                {
+                    tailLabels.emplace(label);
+                    newEnd = std::max(newEnd, static_cast<size_t>(label) + 4);
+                }
+            }
+        }
+
+        if (newEnd == 0)
+            continue;
+
+        // Grow the extension by the parsed sizes of the case bodies it covers,
+        // so the last body is not cut off in the middle (or before its blr).
+        for (size_t j = i + 1; j < functions.size() && functions[j].base < newEnd; j++)
+        {
+            if (tailLabels.find(functions[j].base) != tailLabels.end())
+                newEnd = std::max(newEnd, functions[j].base + functions[j].size);
+        }
+
+        if (newEnd > fn.base + fn.size + maxSwitchExtension)
+            continue;
+
+        const Section* section = image.FindSection(fn.base);
+        if (section != nullptr && newEnd <= section->base + section->size)
+        {
+            fmt::println("Extending function at 0x{:X} from 0x{:X} to 0x{:X} bytes to cover its switch case labels.", fn.base, fn.size, newEnd - fn.base);
+            fn.size = newEnd - fn.base;
+        }
+    }
 }
 
 bool Recompiler::Recompile(
