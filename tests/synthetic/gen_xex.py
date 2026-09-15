@@ -317,6 +317,14 @@ def build_image(t, args):
     if not args.no_pdata:
         sections.append(('.pdata', PDATA_VA, len(pdata), 0x40000040))
 
+    # Replicate two PE section table quirks seen in real console XEX2 images:
+    #   * a stripped .reloc section: its data is consumed by the system
+    #     loader, leaving VirtualSize = 0 and an out-of-range stale address;
+    #   * page rounding that makes the last section stick out slightly past
+    #     the end of the image, which loaders must clamp, not reject.
+    sections.append(('.reloc', 0xFFFF0000, 0, 0x42000042))
+    sections.append(('.pad', image_size - 4, 0x40, 0x40000040))
+
     image = bytearray(image_size)
     headers = pe_headers(sections)
     image[0:len(headers)] = headers

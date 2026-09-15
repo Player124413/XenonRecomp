@@ -54,7 +54,7 @@ fi
 
 # Regenerate test cases so the suite always matches gen_xex.py.
 note "=== Regenerating synthetic XEX cases ==="
-mkdir -p out
+mkdir -p cases out
 : > out/gen.log
 gen() { python3 gen_xex.py "$@" >> out/gen.log 2>&1; }
 gen cases/valid.xex --symbols out/symbols.txt &&

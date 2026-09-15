@@ -464,14 +464,37 @@ Image Xex2LoadImage(const uint8_t* data, size_t dataSize)
             flags |= SectionFlags_Code;
         }
 
-        if (section.VirtualAddress >= image.size || section.Misc.VirtualSize > image.size - section.VirtualAddress)
+        const char* sectionName = reinterpret_cast<const char*>(section.Name);
+
+        // Stripped sections carry no data. Real console executables commonly
+        // have a .reloc entry whose data was consumed by the system loader,
+        // leaving VirtualSize = 0 and sometimes an out-of-range address.
+        // There is nothing to map, so do not reject the whole image for it.
+        if (section.Misc.VirtualSize == 0)
         {
-            fmt::println("ERROR: XEX2 image section {} is out of bounds. The file may be corrupt.", reinterpret_cast<const char*>(section.Name));
+            if (section.VirtualAddress >= image.size)
+                fmt::println("WARNING: Ignoring XEX2 image section {} with an out-of-bounds address (0x{:X}) and a virtual size of zero.", sectionName, section.VirtualAddress);
+
+            continue;
+        }
+
+        if (section.VirtualAddress >= image.size)
+        {
+            fmt::println("ERROR: XEX2 image section {} (0x{:X} + 0x{:X}) lies outside the image (0x{:X}). The file may be corrupt.", sectionName, section.VirtualAddress, section.Misc.VirtualSize, image.size);
             return {};
         }
 
-        image.Map(reinterpret_cast<const char*>(section.Name), section.VirtualAddress, 
-            section.Misc.VirtualSize, flags, image.data.get() + section.VirtualAddress);
+        uint32_t virtualSize = section.Misc.VirtualSize;
+        if (virtualSize > image.size - section.VirtualAddress)
+        {
+            // Page rounding can make the last section stick out past the end
+            // of the image. Clamp it instead of mapping (and later reading)
+            // out of bounds.
+            fmt::println("WARNING: XEX2 image section {} extends past the end of the image (0x{:X} + 0x{:X} > 0x{:X}), clamping its size.", sectionName, section.VirtualAddress, virtualSize, image.size);
+            virtualSize = static_cast<uint32_t>(image.size - section.VirtualAddress);
+        }
+
+        image.Map(sectionName, section.VirtualAddress, virtualSize, flags, image.data.get() + section.VirtualAddress);
     }
 
     auto* imports = reinterpret_cast<const Xex2ImportHeader*>(getOptHeaderPtr(data, XEX_HEADER_IMPORT_LIBRARIES));
