@@ -80,6 +80,83 @@ def bgt(from_addr, to_addr, cr=0, link=False):
     d = to_addr - from_addr
     return 0x40000000 | (12 << 21) | ((4 * cr + 1) << 16) | (d & 0xFFFC) | (1 if link else 0)
 
+# --- update-form / indexed-update memory ops --------------------------------
+
+def _dform(op, rd, d, ra):
+    return (op << 26) | (rd << 21) | (ra << 16) | (d & 0xFFFF)
+
+def lhzu(rd, d, ra):   return _dform(41, rd, d, ra)
+def lhau(rd, d, ra):   return _dform(43, rd, d, ra)
+def sthu(rs, d, ra):   return _dform(45, rs, d, ra)
+def lfsu(fr, d, ra):   return _dform(49, fr, d, ra)
+def lfdu(fr, d, ra):   return _dform(51, fr, d, ra)
+def stfsu(fr, d, ra):  return _dform(53, fr, d, ra)
+def stfdu(fr, d, ra):  return _dform(55, fr, d, ra)
+
+def _xform(xo, a, b, c, rc=0):
+    return 0x7C000000 | (a << 21) | (b << 16) | (c << 11) | (xo << 1) | rc
+
+def ldux(rt, ra, rb):   return _xform(53, rt, ra, rb)
+def lwzux(rt, ra, rb):  return _xform(55, rt, ra, rb)
+def lbzux(rt, ra, rb):  return _xform(119, rt, ra, rb)
+def stdux(rs, ra, rb):  return _xform(181, rs, ra, rb)
+def stbux(rs, ra, rb):  return _xform(247, rs, ra, rb)
+def lhzux(rt, ra, rb):  return _xform(311, rt, ra, rb)
+def lhaux(rt, ra, rb):  return _xform(375, rt, ra, rb)
+def sthux(rs, ra, rb):  return _xform(439, rs, ra, rb)
+def lfsux(fr, ra, rb):  return _xform(567, fr, ra, rb)
+def lfdux(fr, ra, rb):  return _xform(631, fr, ra, rb)
+def stfsux(fr, ra, rb): return _xform(695, fr, ra, rb)
+def stfdux(fr, ra, rb): return _xform(759, fr, ra, rb)
+def lvehx(vd, ra, rb):  return _xform(39, vd, ra, rb)
+
+def addc(rt, ra, rb, rc=0):   return _xform(10, rt, ra, rb, rc)
+def subfze(rt, ra, rc=0):     return 0x7C000000 | (rt << 21) | (ra << 16) | (200 << 1) | rc
+def addme(rt, ra, rc=0):      return 0x7C000000 | (rt << 21) | (ra << 16) | (234 << 1) | rc
+def eqv(ra, rs, rb, rc=0):    return _xform(284, ra, rs, rb, rc)
+def rldicl(ra, rs, sh, mb, rc=0):
+    return 0x78000000 | (rs << 21) | (ra << 16) | ((sh & 0x1F) << 11) | (((sh >> 5) & 1) << 1) | ((mb & 0x1F) << 6) | (((mb >> 5) & 1) << 5) | rc
+
+# --- CTR-decrement conditional branches -------------------------------------
+
+def bc_ctr(bo, bi, from_addr, to_addr):
+    d = to_addr - from_addr
+    return 0x40000000 | (bo << 21) | (bi << 16) | (d & 0xFFFC)
+
+# BO values for the ctr-decrement conditionals (hint bit masked off)
+BO_BDNZF = 0x0
+BO_BDZF  = 0x2
+BO_BDNZT = 0x8
+BO_BDZT  = 0xA
+
+# --- VMX / VMX128 -------------------------------------------------------------
+
+def _vx(vd, va, vb, xo):
+    return 0x10000000 | (vd << 21) | (va << 16) | (vb << 11) | xo
+
+def vnor(vd, va, vb):     return _vx(vd, va, vb, 1284)
+def vslh(vd, va, vb):     return _vx(vd, va, vb, 324)
+def vsrh(vd, va, vb):     return _vx(vd, va, vb, 580)
+def vspltish(vd, simm):   return _vx(vd, simm & 0x1F, 0, 844)
+def vpkuwum(vd, va, vb):  return _vx(vd, va, vb, 78)
+def vadduhs(vd, va, vb):  return _vx(vd, va, vb, 576)
+def vsubuws(vd, va, vb):  return _vx(vd, va, vb, 1664)
+def vctuxs(vd, vb, uimm): return _vx(vd, uimm & 0x1F, vb, 906)
+
+# 128-register fields are split across the word; mirror the disassembler's
+# extract_va128/extract_vb128/extract_vds128 bit layouts.
+def _vd128(v): return ((v & 0x1F) << 21) | (((v >> 5) & 1) << 2) | (((v >> 6) & 1) << 3)
+def _va128(v): return ((v & 0x1F) << 16) | (((v >> 5) & 1) << 5) | (((v >> 6) & 1) << 10)
+def _vb128(v): return ((v & 0x1F) << 11) | ((v >> 5) & 1) | (((v >> 6) & 1) << 1)
+
+def _vx128(xop, vd, va, vb):
+    return 0x14000000 | (xop & 0x3D0) | _vd128(vd) | _va128(va) | _vb128(vb)
+
+def vpkswss128(vd, va, vb): return _vx128(640, vd, va, vb)
+def vnor128(vd, va, vb):    return _vx128(656, vd, va, vb)
+def vsel128(vd, va, vb):    return _vx128(848, vd, va, vb)   # vC is the vD field
+def vpkuwum128(vd, va, vb): return _vx128(896, vd, va, vb)
+
 # ---------------------------------------------------------------------------
 # Text section layout
 # ---------------------------------------------------------------------------
@@ -235,11 +312,85 @@ def build_text():
     t.emit(li(5, 0x55))
     t.emit(blr())
 
+    # --- func_newinstrs: exercises every instruction family that Sonic
+    # Generations needs and that used to hit "Unrecognized instruction" ------
+    t.mark('func_newinstrs')
+    func_newinstrs = t.here()
+
+    # D-form update loads/stores (base r21, data r20/f20)
+    t.emit(lhzu(20, 8, 21))
+    t.emit(lhau(20, 8, 21))
+    t.emit(sthu(20, 8, 21))
+    t.emit(lfsu(20, 8, 21))
+    t.emit(lfdu(20, 8, 21))
+    t.emit(stfsu(20, 8, 21))
+    t.emit(stfdu(20, 8, 21))
+
+    # X-form indexed update loads/stores (base r21, index r22)
+    t.emit(lhzux(20, 21, 22))
+    t.emit(lhaux(20, 21, 22))
+    t.emit(lbzux(20, 21, 22))
+    t.emit(lwzux(20, 21, 22))
+    t.emit(ldux(20, 21, 22))
+    t.emit(sthux(20, 21, 22))
+    t.emit(stbux(20, 21, 22))
+    t.emit(stdux(20, 21, 22))
+    t.emit(lfsux(20, 21, 22))
+    t.emit(lfdux(20, 21, 22))
+    t.emit(stfsux(20, 21, 22))
+    t.emit(stfdux(20, 21, 22))
+    t.emit(lvehx(20, 21, 22))
+
+    # Carry arithmetic (plain + Rc forms)
+    t.emit(addc(20, 21, 22))
+    t.emit(addc(20, 21, 22, rc=1))
+    t.emit(subfze(20, 21))
+    t.emit(subfze(20, 21, rc=1))
+    t.emit(addme(20, 21))
+    t.emit(addme(20, 21, rc=1))
+    t.emit(eqv(20, 21, 22))
+    t.emit(eqv(20, 21, 22, rc=1))
+    t.emit(rldicl(20, 21, 0, 32, rc=1))   # rldicl. (MB != 0 keeps it off the rotldi alias)
+    t.emit(rldicl(20, 21, 5, 0, rc=1))    # rotldi. alias with RC
+
+    # CTR-decrement conditional branches, each CR bit flavour, all jumping
+    # forward to the final blr (targets patched below).
+    bdzf_at = t.here();  t.emit(0)   # bdzf  cr0.eq, end
+    bdzt_at = t.here();  t.emit(0)   # bdzt  cr0.gt, end
+    bdnzt_at = t.here(); t.emit(0)   # bdnzt cr0.lt, end
+    bdnzf_at = t.here(); t.emit(0)   # bdnzf cr0.so, end
+
+    # Classic VMX
+    t.emit(mtctr(21))
+    t.emit(vnor(20, 21, 22))
+    t.emit(vslh(20, 21, 22))
+    t.emit(vsrh(20, 21, 22))
+    t.emit(vspltish(20, -3))
+    t.emit(vpkuwum(20, 21, 22))
+    t.emit(vadduhs(20, 21, 22))
+    t.emit(vsubuws(20, 21, 22))
+    t.emit(vctuxs(20, 21, 4))
+    t.emit(vctuxs(20, 21, 0))
+
+    # VMX128 on the high register bank
+    t.emit(vnor128(100, 101, 102))
+    t.emit(vpkswss128(100, 101, 102))
+    t.emit(vsel128(100, 101, 102))
+    t.emit(vpkuwum128(100, 101, 102))
+
+    t.mark('func_newinstrs_end')
+    t.emit(blr())
+
     # --- resolve placeholders -------------------------------------------------
     words = t.words
 
     def index_of(addr):
         return (addr - IMAGE_BASE - TEXT_VA) // 4
+
+    words[index_of(bdzf_at)] = bc_ctr(BO_BDZF, 2, bdzf_at, t.symbols['func_newinstrs_end'])
+    words[index_of(bdzt_at)] = bc_ctr(BO_BDZT, 1, bdzt_at, t.symbols['func_newinstrs_end'])
+    words[index_of(bdnzt_at)] = bc_ctr(BO_BDNZT, 0, bdnzt_at, t.symbols['func_newinstrs_end'])
+    words[index_of(bdnzf_at)] = bc_ctr(BO_BDNZF, 3, bdnzf_at, t.symbols['func_newinstrs_end'])
 
     words[index_of(bl_main)] = b(bl_main, func_main, link=True)
     words[index_of(bl_helper)] = b(bl_helper, func_helper, link=True)
@@ -307,6 +458,8 @@ def build_image(t, args):
         pdata += pdata_entry(t.symbols['func_pdata_only'], 0, 0)
     else:
         pdata += pdata_entry(t.symbols['func_pdata_only'], 2, 0)
+    pdata += pdata_entry(t.symbols['func_newinstrs'],
+                         (t.symbols['func_newinstrs_end'] + 4 - t.symbols['func_newinstrs']) // 4, 0)
     pdata += b'\0' * (0x200 - len(pdata))
 
     image_size = PDATA_VA + len(pdata)

@@ -629,6 +629,11 @@ inline simde__m128i simde_mm_adds_epu32(simde__m128i a, simde__m128i b)
     return simde_mm_add_epi32(a, simde_mm_min_epu32(simde_mm_xor_si128(a, simde_mm_cmpeq_epi32(a, a)), b));
 }
 
+inline simde__m128i simde_mm_subs_epu32(simde__m128i a, simde__m128i b)
+{
+    return simde_mm_sub_epi32(a, simde_mm_min_epu32(a, b));
+}
+
 inline simde__m128i simde_mm_avg_epi8(simde__m128i a, simde__m128i b)
 {
     simde__m128i c = simde_mm_set1_epi8(char(128));
@@ -680,6 +685,22 @@ inline simde__m128i simde_mm_vctsxs(simde__m128 src1)
     xmm1 = simde_mm_andnot_si128(simde_mm_castps_si128(src1), xmm1);
     simde__m128 dest = simde_mm_blendv_ps(simde_mm_castsi128_ps(xmm0), simde_mm_castsi128_ps(simde_mm_set1_epi32(INT_MAX)), simde_mm_castsi128_ps(xmm1));
     return simde_mm_andnot_si128(simde_mm_castps_si128(xmm2), simde_mm_castps_si128(dest));
+}
+
+inline simde__m128i simde_mm_vctuxs(simde__m128 src1)
+{
+    // Converts floats to unsigned 32-bit integers, saturating to [0, 0xFFFFFFFF].
+    // NaNs and negative values become zero.
+    const simde__m128i two31 = simde_mm_set1_epi32(0x4F000000);
+    const simde__m128i two32 = simde_mm_set1_epi32(0x4F800000);
+
+    simde__m128i lo = simde_mm_cvttps_epi32(src1);
+    simde__m128i hi = simde_mm_xor_si128(simde_mm_cvttps_epi32(simde_mm_sub_ps(src1, simde_mm_castsi128_ps(two31))), simde_mm_set1_epi32(INT_MIN));
+
+    simde__m128i dest = simde_mm_castps_si128(simde_mm_blendv_ps(simde_mm_castsi128_ps(lo), simde_mm_castsi128_ps(hi), simde_mm_cmpge_ps(src1, simde_mm_castsi128_ps(two31))));
+    dest = simde_mm_castps_si128(simde_mm_blendv_ps(simde_mm_castsi128_ps(dest), simde_mm_castsi128_ps(simde_mm_set1_epi32(-1)), simde_mm_cmpge_ps(src1, simde_mm_castsi128_ps(two32))));
+
+    return simde_mm_and_si128(dest, simde_mm_castps_si128(simde_mm_cmpge_ps(src1, simde_mm_setzero_ps())));
 }
 
 inline simde__m128i simde_mm_vsr(simde__m128i a, simde__m128i b)

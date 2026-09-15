@@ -142,6 +142,24 @@ run_err_case garbage            configs/garbage.toml
 run_err_case missing            configs/missing.toml
 
 # ---------------------------------------------------------------------------
+# func_newinstrs exercises the instruction families Sonic Generations needs
+# (update-form loads/stores, addc/subfze/addme/eqv, bdzf/bdzt/bdnzt/bdnzf,
+#  vnor/vslh/vsrh/vspltish/vpkuwum/vadduhs/vsubuws/vctuxs, lvehx,
+#  vnor128/vpkswss128/vsel128/vpkuwum128). None of them may fall through to
+# the unrecognized/undecodable paths, and the function must be recompiled.
+note ""
+note "=== New instruction coverage (func_newinstrs) ==="
+check "valid: no unrecognized instructions" $((! grep -q "Unrecognized instruction" out/valid.case.log); echo $?) "see out/valid.case.log"
+check "valid: no undecodable instructions" $((! grep -q "Unable to decode" out/valid.case.log); echo $?) "see out/valid.case.log"
+check "valid: no RC-bit warnings" $((! grep -q "has RC bit enabled" out/valid.case.log); echo $?) "see out/valid.case.log"
+newinstrs_addr=$(grep '^func_newinstrs=' out/symbols.txt | cut -d= -f2)
+if [ -n "$newinstrs_addr" ]; then
+    check "func_newinstrs recompiled into mapping" $(grep -qi "$newinstrs_addr" out/ppc_valid/ppc_func_mapping.cpp; echo $?) "$newinstrs_addr missing from out/ppc_valid/ppc_func_mapping.cpp"
+else
+    check "func_newinstrs symbol emitted" 1 "func_newinstrs missing from out/symbols.txt"
+fi
+
+# ---------------------------------------------------------------------------
 # Auto-detection must find all 8 CRT helpers without config addresses.
 note ""
 note "=== CRT helper auto-detection ==="
